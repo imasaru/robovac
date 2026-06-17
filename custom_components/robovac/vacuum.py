@@ -576,7 +576,7 @@ class RoboVacEntity(StateVacuumEntity):
                     self._attr_tuya_state,
                 )
                 return return_progress_activity
-            if activity == VacuumActivity.IDLE and mode_activity not in (None, VacuumActivity.IDLE):
+            if activity == VacuumActivity.IDLE and mode_activity not in (None, VacuumActivity.IDLE) and self._attr_tuya_state not in ["Standby", "Sleeping", "Idle", "Recharge needed"]:
                 _LOGGER.debug(
                     "Using mode activity %s over idle status %s",
                     mode_activity,
@@ -625,6 +625,7 @@ class RoboVacEntity(StateVacuumEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the device-specific state attributes of this vacuum."""
         data: dict[str, Any] = {}
+        data["raw_tuya_state"] = self._attr_tuya_state
 
         error_code = self._attr_error_code
         if _is_error_code(error_code) and error_code is not None:
@@ -1436,6 +1437,11 @@ class RoboVacEntity(StateVacuumEntity):
         if not self._attr_room_names:
             await self._async_fetch_rooms_from_cloud_once()
         if not self._attr_room_names:
+            if self.robovac_supported and self.robovac_supported & RoboVacEntityFeature.ROOM:
+                return [
+                    Segment(id=str(i), name=f"Room {i}")
+                    for i in range(1, 32)
+                ]
             return []
         return [
             Segment(id=str(entry["id"]), name=str(entry["label"]))
@@ -1806,6 +1812,15 @@ class RoboVacEntity(StateVacuumEntity):
                 )
                 await self.vacuum.async_set({self.get_dps_code("MODE"): payload})
                 return
+
+            # Normalize room IDs for non-T2320 models
+            normalized_room_ids = []
+            for room_id in room_ids:
+                try:
+                    normalized_room_ids.append(int(room_id))
+                except (TypeError, ValueError):
+                    _LOGGER.warning("Ignoring invalid room id: %s", room_id)
+            room_ids = normalized_room_ids
 
             mode_dps = self.get_dps_code("MODE")
             auto_val = self.vacuum.getRoboVacCommandValue(RobovacCommand.MODE, "auto")

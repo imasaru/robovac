@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.components.vacuum import VacuumActivity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, EntityCategory, CONF_NAME, CONF_ID, CONF_MODEL
 from homeassistant.core import HomeAssistant
@@ -175,6 +176,12 @@ class RobovacBatterySensor(SensorEntity):
         self._attr_unique_id = f"{item[CONF_ID]}_battery"
         self._attr_name = "Battery"
         self._attr_device_info = _device_info(item)
+        self._is_charging = False
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        return {"is_charging": self._is_charging}
 
     async def async_update(self) -> None:
         try:
@@ -209,6 +216,10 @@ class RobovacBatterySensor(SensorEntity):
                     # Some models might send stringified numbers or floats
                     self._attr_native_value = int(float(battery_value))
                     self._attr_available = True
+                    self._is_charging = (
+                        vacuum_entity._attr_tuya_state in ("Charging", "recharging")
+                        or (vacuum_entity.activity == VacuumActivity.DOCKED and self._attr_native_value < 100)
+                    )
                     _LOGGER.debug(
                         "Battery for %s: %s%% (DPS code: %s)",
                         self.robovac_id,
