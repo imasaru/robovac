@@ -37,16 +37,10 @@ class T2275(RobovacModelDetails):
                 "return_home": "AggB",
             },
         },
-        RobovacCommand.CLEAN_PARAM: {
-            "code": 154,
-        },
         RobovacCommand.FAN_SPEED: {
-            "code": 158,
+            "code": 154,
             "values": {
-                "quiet": "Quiet",
-                "standard": "Standard",
-                "turbo": "Turbo",
-                "max": "Max",
+                "fan_speed": "AgkBCgIKAQoDCgEKBAoB",
             },
         },
         RobovacCommand.LOCATE: {

@@ -224,8 +224,6 @@ def get_eufy_vacuums(self: dict[str, Any]) -> requests.Response:
 async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
     """Validate the user input allows us to connect."""
     await hass.async_add_executor_job(get_eufy_vacuums, data)
-    if not data.get(CONF_VACS):
-        raise NoVacuumsFound
     return data
 
 
@@ -251,8 +249,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore[call
             errors["base"] = "cannot_connect"
         except InvalidAuth:
             errors["base"] = "invalid_auth"
-        except NoVacuumsFound:
-            errors["base"] = "no_vacuums_found"
         except Exception as e:  # pylint: disable=broad-except
             _LOGGER.exception("Unexpected exception: {}".format(e))
             errors["base"] = "unknown"
@@ -281,10 +277,6 @@ class CannotConnect(HomeAssistantError):
 
 class InvalidAuth(HomeAssistantError):
     """Error to indicate there is invalid auth."""
-
-
-class NoVacuumsFound(HomeAssistantError):
-    """Error to indicate no compatible vacuums were discovered."""
 
 
 class OptionsFlowHandler(config_entries.OptionsFlow):

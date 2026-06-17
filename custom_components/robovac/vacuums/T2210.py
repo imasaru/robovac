@@ -54,7 +54,6 @@ class T2210(RobovacModelDetails):
         RobovacCommand.FAN_SPEED: {
             "code": 102,
             "values": {
-                "quiet": "Quiet",
                 "standard": "Standard",
                 "turbo": "Turbo",
                 "max": "Max",

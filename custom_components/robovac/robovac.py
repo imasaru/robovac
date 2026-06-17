@@ -152,10 +152,7 @@ class RoboVac(TuyaDevice):
         # Return the keys title-cased as display names for the UI
         # This ensures user-friendly names like "Pure" are shown even when
         # the device uses different internal values like "Quiet"
-        return [
-            key.replace("_", " ").title().replace(" Iq", " IQ")
-            for key in values.keys()
-        ]
+        return [key.replace("_", " ").title() for key in values.keys()]
 
     def getSupportedCommands(self) -> list[str]:
         """Get the list of supported commands for this vacuum model.
@@ -245,29 +242,6 @@ class RoboVac(TuyaDevice):
             pass
 
         return value
-
-    def supportsRoboVacCommandValue(
-        self, command_name: RobovacCommand, value: str
-    ) -> bool:
-        """Return whether a model explicitly supports a command value.
-
-        Commands without a model-specific values table keep their existing
-        passthrough behavior.
-        """
-        try:
-            cmd = (
-                command_name
-                if isinstance(command_name, RobovacCommand)
-                else RobovacCommand(command_name)
-            )
-            values = self._get_command_values(cmd)
-        except (ValueError, KeyError):
-            return True
-
-        if values is None:
-            return True
-
-        return value in values
 
     def getRoboVacHumanReadableValue(self, command_name: RobovacCommand, value: str) -> str:
         """Convert model-specific device value to human-readable command value.

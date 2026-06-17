@@ -69,7 +69,6 @@ class T2181(RobovacModelDetails):
             "code": 102,
             "values": {
                 "quiet": "Quiet",
-                "standard": "Standard",
                 "turbo": "Turbo",
                 "max": "Max",
             },
