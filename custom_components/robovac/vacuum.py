@@ -518,6 +518,9 @@ class RoboVacEntity(StateVacuumEntity):
             return_progress_activity = None
         error_code = self.error_code
         if _is_error_code(error_code) and error_code is not None:
+            if error_code == "CONNECTION_FAILED" and self._attr_tuya_state in ("Sleeping", "standby"):
+                return VacuumActivity.IDLE
+
             _LOGGER.debug(
                 "State changed to error. Error message: {}".format(
                     getErrorMessage(error_code)
@@ -878,11 +881,17 @@ class RoboVacEntity(StateVacuumEntity):
 
             # Set error code after maximum retries
             if self.update_failures >= UPDATE_RETRIES:
-                self._attr_error_code = "CONNECTION_FAILED"
-                _LOGGER.error(
-                    "Maximum update retries reached for vacuum %s. Marking as unavailable",
-                    self._attr_name
-                )
+                if self._attr_tuya_state in ("Sleeping", "standby"):
+                    _LOGGER.debug(
+                        "Maximum update retries reached for vacuum %s, but device is sleeping. Ignoring connection error.",
+                        self._attr_name
+                    )
+                else:
+                    self._attr_error_code = "CONNECTION_FAILED"
+                    _LOGGER.error(
+                        "Maximum update retries reached for vacuum %s. Marking as unavailable",
+                        self._attr_name
+                    )
 
     async def pushed_update_handler(self) -> None:
         """Handle updates pushed from the vacuum.
