@@ -15,6 +15,7 @@ class T2194(RobovacModelDetails):
         | VacuumEntityFeature.STATE
         | VacuumEntityFeature.STOP
         | VacuumEntityFeature.MAP
+        | VacuumEntityFeature.CLEAN_AREA
     )
     robovac_features = (
         RoboVacEntityFeature.CLEANING_TIME
