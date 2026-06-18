@@ -1,5 +1,5 @@
 """RoboVac L35 Hybrid (T2194)"""
-from homeassistant.components.vacuum import VacuumEntityFeature
+from homeassistant.components.vacuum import VacuumActivity, VacuumEntityFeature
 from .base import RoboVacEntityFeature, RobovacCommand, RobovacModelDetails
 
 
@@ -88,4 +88,13 @@ class T2194(RobovacModelDetails):
                 "0": "No error",
             },
         },
+    }
+    activity_mapping = {
+        "Charging": VacuumActivity.DOCKED,
+        "Completed": VacuumActivity.DOCKED,
+        "Running": VacuumActivity.CLEANING,
+        "Returning to Dock": VacuumActivity.RETURNING,
+        "Standby": VacuumActivity.IDLE,
+        "Sleeping": VacuumActivity.IDLE,
+        "Recharge needed": VacuumActivity.IDLE,
     }
