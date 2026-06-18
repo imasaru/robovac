@@ -581,20 +581,22 @@ class RoboVacEntity(StateVacuumEntity):
                     self._attr_tuya_state
                 )
                 return None
-        elif self._attr_tuya_state == "Charging" or self._attr_tuya_state == "completed" or self._attr_tuya_state == "Completed" or self._attr_tuya_state == "recharging":
-            return VacuumActivity.DOCKED
-        elif self._attr_tuya_state == "Recharge" or self._attr_tuya_state == "going_to_recharge":
-            return VacuumActivity.RETURNING
-        elif self._attr_tuya_state == "Sleeping" or self._attr_tuya_state == "standby":
-            return VacuumActivity.IDLE
-        elif self._attr_tuya_state == "Paused":
-            return VacuumActivity.PAUSED
         else:
-            _LOGGER.debug(
-                "State changed to cleaning. Raw Tuya state: %s",
-                self._attr_tuya_state
-            )
-            return VacuumActivity.CLEANING
+            state_str = str(self._attr_tuya_state).lower() if self._attr_tuya_state is not None else ""
+            if state_str in ("charging", "completed", "recharging"):
+                return VacuumActivity.DOCKED
+            elif state_str in ("recharge", "going_to_recharge"):
+                return VacuumActivity.RETURNING
+            elif state_str in ("sleeping", "standby", "idle", "recharge needed"):
+                return VacuumActivity.IDLE
+            elif state_str == "paused":
+                return VacuumActivity.PAUSED
+            else:
+                _LOGGER.debug(
+                    "State changed to cleaning. Raw Tuya state: %s",
+                    self._attr_tuya_state
+                )
+                return VacuumActivity.CLEANING
 
     def _return_progress_activity(self) -> VacuumActivity | None:
         """Return activity from models that expose return/dock progress on RETURN_HOME DPS."""
