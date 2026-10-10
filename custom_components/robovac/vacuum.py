@@ -183,6 +183,11 @@ ROOM_DISCOVERY_STRATEGIES: dict[str, dict[str, str]] = {
 # to avoid O(n) list comprehension on every property getter access
 VACUUM_ACTIVITY_VALUES = {activity.value for activity in VacuumActivity}
 
+# Raw statuses that genuinely mean the vacuum is at rest. For these the
+# decoded mode DPS (which may still read e.g. "auto" from the last job) must
+# not override the idle status mapping ("phantom cleaning" on the L35 Hybrid).
+_IDLE_STATUSES_IGNORING_MODE = ("Standby", "Sleeping", "Idle", "Recharge needed")
+
 
 @dataclass(frozen=True)
 class RoomSegment:
@@ -576,7 +581,11 @@ class RoboVacEntity(StateVacuumEntity):
                     self._attr_tuya_state,
                 )
                 return return_progress_activity
-            if activity == VacuumActivity.IDLE and mode_activity not in (None, VacuumActivity.IDLE) and self._attr_tuya_state not in ["Standby", "Sleeping", "Idle", "Recharge needed"]:
+            if (
+                activity == VacuumActivity.IDLE
+                and mode_activity not in (None, VacuumActivity.IDLE)
+                and self._attr_tuya_state not in _IDLE_STATUSES_IGNORING_MODE
+            ):
                 _LOGGER.debug(
                     "Using mode activity %s over idle status %s",
                     mode_activity,
