@@ -122,6 +122,11 @@ class RoboVac(TuyaDevice):
             return 0
         return count
 
+    def getRoomCleanSendStart(self) -> bool:
+        """Return whether roomClean sends START_PAUSE (DPS 2) after DPS 124."""
+        send_start = getattr(self.model_details, "room_clean_send_start", True)
+        return send_start if isinstance(send_start, bool) else True
+
     def _get_command_values(
         self, command_name: RobovacCommand
     ) -> dict[str, str] | None:

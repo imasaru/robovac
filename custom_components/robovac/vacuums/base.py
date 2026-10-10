@@ -84,3 +84,9 @@ class RobovacModelDetails(Protocol):
     # Assistant's CLEAN_AREA feature. 0 (default) disables the fallback, so
     # CLEAN_AREA is only offered once room segments are configured.
     room_clean_fallback_room_count: int = 0
+    # Legacy JSON room cleaning writes selectRoomsClean to DPS 124 and then,
+    # about one second later, START_PAUSE=True to DPS 2. Some firmware starts
+    # the room clean from DPS 124 alone and treats the extra start as "auto
+    # clean the whole house" (upstream issue #624, seen on T2193 LR30 Hybrid).
+    # Set to False on such models to skip the follow-up start command.
+    room_clean_send_start: bool = True

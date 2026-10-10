@@ -1885,6 +1885,7 @@ class RoboVacEntity(StateVacuumEntity):
         map_id: Any | None = None
         raw_room_ids: Any = None
         count: Any = 1
+        send_start_override: Any = None
         if isinstance(params, list) and params and all(isinstance(item, dict) for item in params):
             # HA may pass params as a list of single-key dicts.
             merged: dict[str, Any] = {}
@@ -1895,6 +1896,7 @@ class RoboVacEntity(StateVacuumEntity):
             raw_room_ids = _first_present(params, "roomIds", "room_ids")
             count = params.get("count", 1)
             map_id = _first_present(params, "mapId", "map_id")
+            send_start_override = _first_present(params, "sendStart", "send_start")
         elif isinstance(params, list):
             raw_room_ids = params
         else:
@@ -1966,6 +1968,9 @@ class RoboVacEntity(StateVacuumEntity):
             except (TypeError, ValueError) as err:
                 raise ServiceValidationError(f"Invalid roomClean map id: {map_id!r}") from err
 
+        # Resolve (and validate) before anything is written to the vacuum.
+        send_start = self._room_clean_send_start(send_start_override)
+
         mode_dps = self.get_dps_code("MODE")
         auto_val = self.vacuum.getRoboVacCommandValue(RobovacCommand.MODE, "auto")
 
@@ -1989,11 +1994,30 @@ class RoboVacEntity(StateVacuumEntity):
             base64_str = base64.b64encode(json_str.encode("utf8")).decode("utf8")
             _LOGGER.debug("roomClean JSON: %s", json_str)
             await self.vacuum.async_set({TuyaCodes.ROOM_CLEAN: base64_str})
+            if not send_start:
+                _LOGGER.debug("roomClean: skipping follow-up start command for %s", self.model_code)
+                return
             # Wait for the vacuum to ACK DPS 124 before sending the start command.
             # Without this delay, DPS 2 arrives before the room selection is processed
             # and the vacuum ignores the start command.
             await asyncio.sleep(1)
             await self.vacuum.async_set({TuyaCodes.START_PAUSE: True})
+
+    def _room_clean_send_start(self, override: Any = None) -> bool:
+        """Return whether to send START_PAUSE after a selectRoomsClean payload.
+
+        A boolean ``send_start``/``sendStart`` roomClean parameter overrides the
+        model's ``room_clean_send_start`` flag (default True).
+        """
+        if isinstance(override, bool):
+            return override
+        if override is not None:
+            raise ServiceValidationError(f"Invalid roomClean send_start value: {override!r}")
+        getter = getattr(self.vacuum, "getRoomCleanSendStart", None)
+        if not callable(getter):
+            return True
+        send_start = getter()
+        return send_start if isinstance(send_start, bool) else True
 
     async def async_will_remove_from_hass(self) -> None:
         """Handle removal from Home Assistant."""
