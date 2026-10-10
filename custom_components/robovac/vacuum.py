@@ -19,6 +19,7 @@ This module provides the vacuum entity integration for Eufy Robovac devices.
 from __future__ import annotations
 import asyncio
 import base64
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
@@ -50,7 +51,7 @@ from homeassistant.const import (
     CONF_USERNAME,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -216,6 +217,9 @@ class RoomSegmentMap:
 
     map_id: int
     segments: tuple[RoomSegment, ...]
+    # True only when the user explicitly configured a (valid) map id; the
+    # default of 1 is then not forced onto payloads that never carried one.
+    map_id_configured: bool = False
 
 
 def _parse_room_segments(raw_segments: str | None) -> tuple[RoomSegment, ...]:
@@ -257,13 +261,93 @@ def _parse_room_segment_map_id(raw_map_id: Any) -> int:
         return 1
 
 
-def _parse_clean_count(raw_count: Any) -> int:
-    """Parse room clean repeat count, falling back to one pass."""
+def _room_segment_map_id_is_configured(raw_map_id: Any) -> bool:
+    """Return True when a valid room segment map id was explicitly configured."""
+    if raw_map_id in (None, "") or isinstance(raw_map_id, bool):
+        return False
     try:
-        return max(1, int(raw_count))
+        int(raw_map_id)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _parse_clean_count(raw_count: Any) -> int:
+    """Parse room clean repeat count (cleanTimes) as an integer >= 1.
+
+    Invalid values fall back to a single pass; values below 1 are clamped to 1.
+    """
+    if isinstance(raw_count, bool):
+        _LOGGER.warning("Ignoring invalid room clean count: %s", raw_count)
+        return 1
+    try:
+        if isinstance(raw_count, float):
+            if not raw_count.is_integer():
+                raise ValueError(raw_count)
+            count = int(raw_count)
+        else:
+            count = int(str(raw_count).strip())
     except (TypeError, ValueError):
         _LOGGER.warning("Ignoring invalid room clean count: %s", raw_count)
         return 1
+    if count < 1:
+        _LOGGER.warning("Clamping room clean count %s to 1", raw_count)
+        return 1
+    return count
+
+
+def _normalize_room_ids(
+    raw_room_ids: Any,
+    known_room_ids: Collection[int] | None = None,
+    name: Any = None,
+) -> list[int]:
+    """Convert requested room ids to unique non-negative ints.
+
+    Accepts a single id or a list/tuple of ids (ints or numeric strings).
+    Invalid ids, and ids not in ``known_room_ids`` when given, are dropped with
+    a warning. Order is preserved and duplicates removed. An empty result means
+    nothing should be sent to the vacuum.
+    """
+    if raw_room_ids is None:
+        return []
+    if isinstance(raw_room_ids, (str, int)):
+        raw_room_ids = [raw_room_ids]
+    elif not isinstance(raw_room_ids, (list, tuple)):
+        _LOGGER.warning("Ignoring invalid room id list for %s: %r", name, raw_room_ids)
+        return []
+
+    room_ids: list[int] = []
+    for raw_room_id in raw_room_ids:
+        room_id: int | None = None
+        if isinstance(raw_room_id, bool):
+            room_id = None
+        elif isinstance(raw_room_id, int):
+            room_id = raw_room_id
+        elif isinstance(raw_room_id, float) and raw_room_id.is_integer():
+            room_id = int(raw_room_id)
+        elif isinstance(raw_room_id, str):
+            try:
+                room_id = int(raw_room_id.strip())
+            except ValueError:
+                room_id = None
+        if room_id is None or room_id < 0:
+            _LOGGER.warning("Ignoring invalid room id for %s: %r", name, raw_room_id)
+            continue
+        if known_room_ids is not None and room_id not in known_room_ids:
+            _LOGGER.warning("Ignoring unknown room id for %s: %r", name, raw_room_id)
+            continue
+        if room_id not in room_ids:
+            room_ids.append(room_id)
+    return room_ids
+
+
+def _first_present(params: dict[str, Any], *keys: str) -> Any:
+    """Return the value of the first key present (and not None) in params."""
+    for key in keys:
+        value = params.get(key)
+        if value is not None:
+            return value
+    return None
 
 
 async def async_setup_entry(
@@ -741,9 +825,11 @@ class RoboVacEntity(StateVacuumEntity):
         self._attr_ip_address = item[CONF_IP_ADDRESS]
         self._attr_access_token = item[CONF_ACCESS_TOKEN]
         configured_segments = _parse_room_segments(item.get(CONF_ROOM_SEGMENTS))
+        raw_map_id = item.get(CONF_ROOM_SEGMENT_MAP_ID)
         self._room_segment_map = RoomSegmentMap(
-            map_id=_parse_room_segment_map_id(item.get(CONF_ROOM_SEGMENT_MAP_ID)),
+            map_id=_parse_room_segment_map_id(raw_map_id),
             segments=configured_segments,
+            map_id_configured=_room_segment_map_id_is_configured(raw_map_id),
         )
         self.vacuum: RoboVac | None = None
         self.update_failures = 0
@@ -1450,6 +1536,14 @@ class RoboVacEntity(StateVacuumEntity):
                 return int(room_id_str) if room_id_str.isdigit() else None
         return None
 
+    def _fallback_room_ids(self) -> list[int]:
+        """Return generic room ids offered when no rooms are configured/discovered."""
+        if self._room_segment_map.segments or self._attr_room_names:
+            return []
+        if self.robovac_supported and self.robovac_supported & RoboVacEntityFeature.ROOM:
+            return list(range(1, 32))
+        return []
+
     async def async_get_segments(self) -> list[Segment]:
         """Return cleanable segments for Home Assistant clean-area mapping."""
         if self._room_segment_map.segments:
@@ -1461,65 +1555,57 @@ class RoboVacEntity(StateVacuumEntity):
         if not self._attr_room_names:
             await self._async_fetch_rooms_from_cloud_once()
         if not self._attr_room_names:
-            if self.robovac_supported and self.robovac_supported & RoboVacEntityFeature.ROOM:
-                return [
-                    Segment(id=str(i), name=f"Room {i}")
-                    for i in range(1, 32)
-                ]
-            return []
+            return [
+                Segment(id=str(room_id), name=f"Room {room_id}")
+                for room_id in self._fallback_room_ids()
+            ]
         return [
             Segment(id=str(entry["id"]), name=str(entry["label"]))
             for entry in self._attr_room_names.values()
         ]
 
     async def async_clean_segments(self, segment_ids: list[str], **kwargs: Any) -> None:
-        """Clean Home Assistant native clean-area segments."""
+        """Clean Home Assistant native clean-area segments.
+
+        Configured segments and the generic fallback rooms are validated the
+        same way: ids must convert to known ints, the repeat count must be an
+        integer >= 1, and the configured map id is forwarded. When no valid id
+        remains nothing is sent to the vacuum.
+        """
         clean_count = kwargs.get("count", kwargs.get("repeats", 1))
 
+        known_room_ids: list[int] | None = None
         if self._room_segment_map.segments:
-            known_room_ids = {segment.id for segment in self._room_segment_map.segments}
-            room_ids: list[int] = []
-            for segment_id in segment_ids:
-                try:
-                    room_id = int(segment_id)
-                except (TypeError, ValueError):
-                    _LOGGER.warning(
-                        "Ignoring invalid segment id for %s: %s",
-                        self.name,
-                        segment_id,
-                    )
-                    continue
-                if room_id not in known_room_ids:
-                    _LOGGER.warning(
-                        "Ignoring unknown segment id for %s: %s",
-                        self.name,
-                        segment_id,
-                    )
-                    continue
-                room_ids.append(room_id)
+            known_room_ids = [segment.id for segment in self._room_segment_map.segments]
+        else:
+            fallback_room_ids = self._fallback_room_ids()
+            if fallback_room_ids:
+                known_room_ids = fallback_room_ids
 
-            if not room_ids:
-                _LOGGER.warning(
-                    "No valid segment ids supplied for %s: %s",
-                    self.name,
-                    segment_ids,
-                )
-                return
-
+        if known_room_ids is None:
+            # Discovered rooms (e.g. T2320) are resolved by roomClean itself.
             await self.async_send_command(
                 "roomClean",
-                {
-                    "room_ids": room_ids,
-                    "map_id": self._room_segment_map.map_id,
-                    "count": _parse_clean_count(clean_count),
-                },
+                {"roomIds": segment_ids, "count": clean_count},
             )
             return
 
-        await self.async_send_command(
-            "roomClean",
-            {"roomIds": segment_ids, "count": clean_count},
-        )
+        room_ids = _normalize_room_ids(segment_ids, set(known_room_ids), self.name)
+        if not room_ids:
+            _LOGGER.warning(
+                "No valid segment ids supplied for %s: %s",
+                self.name,
+                segment_ids,
+            )
+            return
+
+        params: dict[str, Any] = {
+            "room_ids": room_ids,
+            "count": _parse_clean_count(clean_count),
+        }
+        if self._room_segment_map.segments or self._room_segment_map.map_id_configured:
+            params["map_id"] = self._room_segment_map.map_id
+        await self.async_send_command("roomClean", params)
 
     async def async_locate(self, **kwargs: Any) -> None:
         """Locate the vacuum cleaner.
@@ -1771,109 +1857,129 @@ class RoboVacEntity(StateVacuumEntity):
                 self.get_dps_code("BOOST_IQ"): new_value
             })
         elif command in ("roomClean", "room_clean", "app_segment_clean") and params is not None:
-            map_id: Any | None = None
-            if isinstance(params, list):
-                # HA may pass params as a list of single-key dicts.
-                if all(isinstance(item, dict) for item in params):
-                    merged: dict[str, Any] = {}
-                    for item in params:
-                        merged.update(item)
-                    params = merged
-                    room_ids = params.get("roomIds") or params.get("room_ids", [1])
-                    count = params.get("count", 1)
-                    map_id = (
-                        params["mapId"] if "mapId" in params else params.get("map_id")
-                    )
+            await self._async_room_clean(params)
+
+    async def _async_room_clean(self, params: dict[str, Any] | list) -> None:
+        """Validate roomClean parameters and send the selected-room clean.
+
+        Raises ServiceValidationError (and sends nothing) when no valid room
+        id remains, so a bad request can never fall through to a whole-house
+        start or silently clean room 1.
+        """
+        if self.vacuum is None:
+            return
+        map_id: Any | None = None
+        raw_room_ids: Any = None
+        count: Any = 1
+        if isinstance(params, list) and params and all(isinstance(item, dict) for item in params):
+            # HA may pass params as a list of single-key dicts.
+            merged: dict[str, Any] = {}
+            for item in params:
+                merged.update(item)
+            params = merged
+        if isinstance(params, dict):
+            raw_room_ids = _first_present(params, "roomIds", "room_ids")
+            count = params.get("count", 1)
+            map_id = _first_present(params, "mapId", "map_id")
+        elif isinstance(params, list):
+            raw_room_ids = params
+        else:
+            _LOGGER.error("roomClean: unexpected params type %s", type(params).__name__)
+            return
+
+        if raw_room_ids is None or raw_room_ids in ([], ""):
+            raise ServiceValidationError("roomClean requires roomIds (list of room ids)")
+
+        clean_times = _parse_clean_count(count)
+
+        if self._supports_t2320_rooms():
+            if not self._attr_room_names:
+                await self._async_fetch_t2320_rooms_from_cloud_once()
+            if isinstance(raw_room_ids, (str, int)):
+                raw_room_ids = [raw_room_ids]
+            normalized_room_ids: list[int] = []
+            for room_id in raw_room_ids:
+                if isinstance(room_id, str) and not room_id.strip().isdigit():
+                    resolved = self._t2320_room_id_for_label(room_id)
+                    if resolved is None:
+                        raise HomeAssistantError(f"Unknown room {room_id!r}")
+                    normalized_room_ids.append(resolved)
                 else:
-                    room_ids = params
-                    count = 1
-            elif isinstance(params, dict):
-                room_ids = params.get("roomIds") or params.get("room_ids", [1])
-                count = params.get("count", 1)
-                map_id = params["mapId"] if "mapId" in params else params.get("map_id")
-            else:
-                _LOGGER.error("roomClean: unexpected params type %s", type(params).__name__)
-                return
-            if self._supports_t2320_rooms():
-                if not self._attr_room_names:
-                    await self._async_fetch_t2320_rooms_from_cloud_once()
-                normalized_room_ids: list[int] = []
-                for room_id in room_ids:
-                    if isinstance(room_id, str) and not room_id.isdigit():
-                        resolved = self._t2320_room_id_for_label(room_id)
-                        if resolved is None:
-                            raise HomeAssistantError(f"Unknown room {room_id!r}")
-                        normalized_room_ids.append(resolved)
-                    else:
-                        normalized_room_ids.append(int(room_id))
-                try:
-                    clean_times = max(1, int(count))
-                except (TypeError, ValueError):
-                    clean_times = 1
-                map_id = self._attr_room_map_id
-                if map_id is None:
-                    if self.hass is None:
-                        raise HomeAssistantError("T2320 room map ID is unavailable")
-                    self._merge_room_meta(
-                        await self.hass.async_add_executor_job(
-                            self._fetch_room_meta_from_cloud_sync
-                        ),
-                        "cloud",
-                    )
-                    map_id = self._attr_room_map_id
-                if map_id is None:
+                    normalized_room_ids.extend(_normalize_room_ids([room_id], name=self.name))
+            if not normalized_room_ids:
+                raise ServiceValidationError(
+                    f"No valid room ids in roomClean request: {raw_room_ids!r}"
+                )
+            map_id = self._attr_room_map_id
+            if map_id is None:
+                if self.hass is None:
                     raise HomeAssistantError("T2320 room map ID is unavailable")
-                payload = build_t2320_room_clean_mode(
-                    normalized_room_ids,
-                    map_id=map_id,
-                    clean_times=clean_times,
+                self._merge_room_meta(
+                    await self.hass.async_add_executor_job(
+                        self._fetch_room_meta_from_cloud_sync
+                    ),
+                    "cloud",
                 )
-                _LOGGER.info(
-                    "T2320 roomClean: rooms=%s map_id=%s payload=%s",
-                    normalized_room_ids,
-                    map_id,
-                    payload,
-                )
-                await self.vacuum.async_set({self.get_dps_code("MODE"): payload})
-                return
+                map_id = self._attr_room_map_id
+            if map_id is None:
+                raise HomeAssistantError("T2320 room map ID is unavailable")
+            payload = build_t2320_room_clean_mode(
+                normalized_room_ids,
+                map_id=map_id,
+                clean_times=clean_times,
+            )
+            _LOGGER.info(
+                "T2320 roomClean: rooms=%s map_id=%s payload=%s",
+                normalized_room_ids,
+                map_id,
+                payload,
+            )
+            await self.vacuum.async_set({self.get_dps_code("MODE"): payload})
+            return
 
-            # Normalize room IDs for non-T2320 models
-            normalized_room_ids = []
-            for room_id in room_ids:
-                try:
-                    normalized_room_ids.append(int(room_id))
-                except (TypeError, ValueError):
-                    _LOGGER.warning("Ignoring invalid room id: %s", room_id)
-            room_ids = normalized_room_ids
+        # Normalize room IDs for non-T2320 models
+        room_ids = _normalize_room_ids(raw_room_ids, name=self.name)
+        if not room_ids:
+            raise ServiceValidationError(
+                f"No valid room ids in roomClean request: {raw_room_ids!r}"
+            )
 
-            mode_dps = self.get_dps_code("MODE")
-            auto_val = self.vacuum.getRoboVacCommandValue(RobovacCommand.MODE, "auto")
+        if map_id is not None:
+            if isinstance(map_id, bool):
+                raise ServiceValidationError(f"Invalid roomClean map id: {map_id!r}")
+            try:
+                map_id = int(map_id)
+            except (TypeError, ValueError) as err:
+                raise ServiceValidationError(f"Invalid roomClean map id: {map_id!r}") from err
 
-            # Protobuf models (e.g. T2278) encode room IDs directly in a
-            # ModeCtrlRequest on the MODE DPS code. Legacy models use a
-            # JSON payload on DPS 124 followed by a start command on DPS 2.
-            if auto_val not in ("auto", "Auto") and mode_dps != TuyaCodes.ROOM_CLEAN:
-                proto_cmd = self._build_protobuf_room_clean(room_ids, count)
-                _LOGGER.debug("roomClean protobuf: room_ids=%s", room_ids)
-                await self.vacuum.async_set({mode_dps: proto_cmd})
-            else:
-                clean_request = {"roomIds": room_ids, "cleanTimes": count}
-                if map_id is not None:
-                    clean_request["mapId"] = map_id
-                method_call = {
-                    "method": "selectRoomsClean",
-                    "data": clean_request,
-                    "timestamp": round(time.time() * 1000),
-                }
-                json_str = json.dumps(method_call, separators=(",", ":"))
-                base64_str = base64.b64encode(json_str.encode("utf8")).decode("utf8")
-                _LOGGER.debug("roomClean JSON: %s", json_str)
-                await self.vacuum.async_set({TuyaCodes.ROOM_CLEAN: base64_str})
-                # Wait for the vacuum to ACK DPS 124 before sending the start command.
-                # Without this delay, DPS 2 arrives before the room selection is processed
-                # and the vacuum ignores the start command.
-                await asyncio.sleep(1)
-                await self.vacuum.async_set({TuyaCodes.START_PAUSE: True})
+        mode_dps = self.get_dps_code("MODE")
+        auto_val = self.vacuum.getRoboVacCommandValue(RobovacCommand.MODE, "auto")
+
+        # Protobuf models (e.g. T2278) encode room IDs directly in a
+        # ModeCtrlRequest on the MODE DPS code. Legacy models use a
+        # JSON payload on DPS 124 followed by a start command on DPS 2.
+        if auto_val not in ("auto", "Auto") and mode_dps != TuyaCodes.ROOM_CLEAN:
+            proto_cmd = self._build_protobuf_room_clean(room_ids, clean_times)
+            _LOGGER.debug("roomClean protobuf: room_ids=%s", room_ids)
+            await self.vacuum.async_set({mode_dps: proto_cmd})
+        else:
+            clean_request: dict[str, Any] = {"roomIds": room_ids, "cleanTimes": clean_times}
+            if map_id is not None:
+                clean_request["mapId"] = map_id
+            method_call = {
+                "method": "selectRoomsClean",
+                "data": clean_request,
+                "timestamp": round(time.time() * 1000),
+            }
+            json_str = json.dumps(method_call, separators=(",", ":"))
+            base64_str = base64.b64encode(json_str.encode("utf8")).decode("utf8")
+            _LOGGER.debug("roomClean JSON: %s", json_str)
+            await self.vacuum.async_set({TuyaCodes.ROOM_CLEAN: base64_str})
+            # Wait for the vacuum to ACK DPS 124 before sending the start command.
+            # Without this delay, DPS 2 arrives before the room selection is processed
+            # and the vacuum ignores the start command.
+            await asyncio.sleep(1)
+            await self.vacuum.async_set({TuyaCodes.START_PAUSE: True})
 
     async def async_will_remove_from_hass(self) -> None:
         """Handle removal from Home Assistant."""
