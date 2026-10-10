@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased (fork: room-cleaning-fixes)
+
+### Bug Fixes
+
+* restore upstream 2.4.3 code accidentally reverted by the HA sync commit (fan speed mappings, T2275 L35 fan speeds, T2258 registration, "no vacuums found" setup error, T2277 start/pause, connection failure DPS, command value and BoostIQ guards)
+* roomClean never sends a start command when no valid room ids remain, and no longer defaults to room 1 when `roomIds` is missing
+* clean_area through the generic Room 1-31 fallback validates ids and cleanTimes and forwards the configured map ID
+* treat `Standby`/`Sleeping` case-insensitively when ignoring connection errors from a sleeping vacuum
+
+### Features
+
+* `room_clean_fallback_room_count` model flag (T2194: 31) replaces the implicit Room 1-31 fallback
+* `room_clean_send_start` model flag and per-call `send_start` parameter to skip the DPS 2 start after `selectRoomsClean` ([#624](https://github.com/damacus/robovac/issues/624)); defaults to sending start
+
 ## [2.4.3](https://github.com/damacus/robovac/compare/v2.4.3...v2.4.3) (2026-06-17)
 
 
