@@ -78,3 +78,9 @@ class RobovacModelDetails(Protocol):
     commands: Dict[RobovacCommand, Any]
     dps_codes: Dict[str, str] = {}  # Optional model-specific DPS codes
     activity_mapping: Dict[str, VacuumActivity] | None = None
+    # Selected-room cleaning fallback. When > 0 and the user has configured no
+    # "Room segments" (and none were discovered), the vacuum entity offers
+    # generic segments "Room 1".."Room N" (ids 1..N) and advertises Home
+    # Assistant's CLEAN_AREA feature. 0 (default) disables the fallback, so
+    # CLEAN_AREA is only offered once room segments are configured.
+    room_clean_fallback_room_count: int = 0

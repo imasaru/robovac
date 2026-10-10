@@ -111,6 +111,17 @@ class RoboVac(TuyaDevice):
         """
         return self.model_details.activity_mapping
 
+    def getRoomCleanFallbackRoomCount(self) -> int:
+        """Return how many generic fallback rooms (ids 1..N) the model offers.
+
+        Used when no room segments are configured or discovered. 0 disables
+        the fallback.
+        """
+        count = getattr(self.model_details, "room_clean_fallback_room_count", 0)
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            return 0
+        return count
+
     def _get_command_values(
         self, command_name: RobovacCommand
     ) -> dict[str, str] | None:

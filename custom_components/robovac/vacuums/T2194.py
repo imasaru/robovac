@@ -15,8 +15,10 @@ class T2194(RobovacModelDetails):
         | VacuumEntityFeature.STATE
         | VacuumEntityFeature.STOP
         | VacuumEntityFeature.MAP
-        | VacuumEntityFeature.CLEAN_AREA
     )
+    # CLEAN_AREA is added by the vacuum entity: room ids 1-31 are offered as
+    # generic "Room N" segments until real room segments are configured.
+    room_clean_fallback_room_count = 31
     robovac_features = (
         RoboVacEntityFeature.CLEANING_TIME
         | RoboVacEntityFeature.CLEANING_AREA

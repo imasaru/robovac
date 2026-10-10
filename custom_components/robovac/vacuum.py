@@ -832,6 +832,7 @@ class RoboVacEntity(StateVacuumEntity):
             map_id_configured=_room_segment_map_id_is_configured(raw_map_id),
         )
         self.vacuum: RoboVac | None = None
+        self._room_clean_fallback_count = 0
         self.update_failures = 0
         self.tuyastatus: dict[str, Any] | None = None
         self._last_no_data_warning_time: float = 0
@@ -898,8 +899,9 @@ class RoboVacEntity(StateVacuumEntity):
         # Set supported features if vacuum was initialized successfully
         if self.vacuum is not None:
             # Get the supported features from the vacuum
+            self._room_clean_fallback_count = self._model_fallback_room_count()
             features = int(self.vacuum.getHomeAssistantFeatures())
-            if self._room_segment_map.segments:
+            if self._room_segment_map.segments or self._room_clean_fallback_count:
                 features |= int(VacuumEntityFeature.CLEAN_AREA)
             self._attr_supported_features = VacuumEntityFeature(features)
             self._attr_robovac_supported = self.vacuum.getRoboVacFeatures()
@@ -1536,13 +1538,25 @@ class RoboVacEntity(StateVacuumEntity):
                 return int(room_id_str) if room_id_str.isdigit() else None
         return None
 
+    def _model_fallback_room_count(self) -> int:
+        """Return the model's generic fallback room count (0 when disabled)."""
+        getter = getattr(self.vacuum, "getRoomCleanFallbackRoomCount", None)
+        if not callable(getter):
+            return 0
+        count = getter()
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            return 0
+        return count
+
     def _fallback_room_ids(self) -> list[int]:
-        """Return generic room ids offered when no rooms are configured/discovered."""
+        """Return generic room ids offered when no rooms are configured/discovered.
+
+        Only models that opt in via ``room_clean_fallback_room_count`` (e.g.
+        T2194) get the generic "Room 1".."Room N" list.
+        """
         if self._room_segment_map.segments or self._attr_room_names:
             return []
-        if self.robovac_supported and self.robovac_supported & RoboVacEntityFeature.ROOM:
-            return list(range(1, 32))
-        return []
+        return list(range(1, self._room_clean_fallback_count + 1))
 
     async def async_get_segments(self) -> list[Segment]:
         """Return cleanable segments for Home Assistant clean-area mapping."""
