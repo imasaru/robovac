@@ -114,6 +114,19 @@ def _is_error_code(value: int | str | None) -> bool:
     return value not in (None, 0, "no_error", "No error")
 
 
+_SLEEPING_STATUSES = frozenset({"sleeping", "standby"})
+
+
+def _is_sleeping_status(state: Any) -> bool:
+    """Return True when a raw/human-readable status means the vacuum is asleep.
+
+    Sleeping vacuums often drop off the local network, so connection failures
+    in these states are expected and should not surface as errors. Models
+    report these statuses with differing case (e.g. T2194 "Standby").
+    """
+    return state is not None and str(state).casefold() in _SLEEPING_STATUSES
+
+
 def _clean_type_label(clean_type: str | None) -> str | None:
     if not clean_type:
         return None
@@ -523,7 +536,7 @@ class RoboVacEntity(StateVacuumEntity):
             return_progress_activity = None
         error_code = self.error_code
         if _is_error_code(error_code) and error_code is not None:
-            if error_code == "CONNECTION_FAILED" and self._attr_tuya_state in ("Sleeping", "standby"):
+            if error_code == "CONNECTION_FAILED" and _is_sleeping_status(self._attr_tuya_state):
                 return VacuumActivity.IDLE
 
             _LOGGER.debug(
@@ -893,7 +906,7 @@ class RoboVacEntity(StateVacuumEntity):
 
             # Set error code after maximum retries
             if self.update_failures >= UPDATE_RETRIES:
-                if self._attr_tuya_state in ("Sleeping", "standby"):
+                if _is_sleeping_status(self._attr_tuya_state):
                     _LOGGER.debug(
                         "Maximum update retries reached for vacuum %s, but device is sleeping. Ignoring connection error.",
                         self._attr_name
