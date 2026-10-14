@@ -7,8 +7,10 @@ from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.components.vacuum import VacuumActivity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, EntityCategory, CONF_NAME, CONF_ID, CONF_MODEL
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.device_registry import DeviceInfo
 
 from .const import CONF_VACS, DOMAIN, REFRESH_RATE
@@ -181,6 +183,25 @@ class RobovacBatterySensor(SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes."""
         return {"is_charging": self._is_charging}
+
+    async def async_added_to_hass(self) -> None:
+        """Refresh as soon as the paired vacuum changes state."""
+        await super().async_added_to_hass()
+        vacuum_entity_id = er.async_get(self.hass).async_get_entity_id(
+            "vacuum", DOMAIN, self.robovac_id
+        )
+        if vacuum_entity_id is None:
+            return
+
+        @callback
+        def _vacuum_state_changed(event: Event[EventStateChangedData]) -> None:
+            self.async_schedule_update_ha_state(True)
+
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, [vacuum_entity_id], _vacuum_state_changed
+            )
+        )
 
     async def async_update(self) -> None:
         try:

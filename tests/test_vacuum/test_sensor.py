@@ -1397,3 +1397,29 @@ async def test_last_clean_duration_sensor_with_time_value() -> None:
 
     assert sensor._attr_available is True
     assert sensor._attr_native_value == 1800  # Stored in seconds (unit: "s")
+
+
+@pytest.mark.asyncio
+async def test_battery_sensor_refreshes_on_vacuum_state_change(hass: Any) -> None:
+    """Battery sensor refreshes immediately when its vacuum changes state."""
+    from homeassistant.helpers import entity_registry as er
+
+    registry = er.async_get(hass)
+    vacuum_entry = registry.async_get_or_create("vacuum", "robovac", "test_robovac_id")
+
+    sensor = RobovacBatterySensor({CONF_ID: "test_robovac_id", "name": "Test RoboVac"})
+    sensor.hass = hass
+    sensor.entity_id = "sensor.test_robovac_battery"
+
+    with patch.object(sensor, "async_schedule_update_ha_state") as schedule:
+        await sensor.async_added_to_hass()
+        hass.states.async_set(vacuum_entry.entity_id, "docked")
+        await hass.async_block_till_done()
+
+        schedule.assert_called_with(True)
+
+        await sensor.async_remove()
+        schedule.reset_mock()
+        hass.states.async_set(vacuum_entry.entity_id, "cleaning")
+        await hass.async_block_till_done()
+        schedule.assert_not_called()
