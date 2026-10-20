@@ -296,6 +296,14 @@ async def async_setup_entry(
         async_add_entities([entity])
 
 
+def _is_sleeping_state(state: Any) -> bool:
+    """Return True if the raw Tuya status means the vacuum is asleep.
+
+    Devices report this in varying case (e.g. T2194 reports "Standby").
+    """
+    return state is not None and str(state).strip().lower() in {"sleeping", "standby"}
+
+
 class RoboVacEntity(StateVacuumEntity):
     """Home Assistant vacuum entity for Tuya-based robotic vacuum cleaners.
 
@@ -542,7 +550,7 @@ class RoboVacEntity(StateVacuumEntity):
             return_progress_activity = None
         error_code = self.error_code
         if _is_error_code(error_code) and error_code is not None:
-            if error_code == "CONNECTION_FAILED" and self._attr_tuya_state in ("Sleeping", "standby"):
+            if error_code == "CONNECTION_FAILED" and _is_sleeping_state(self._attr_tuya_state):
                 return VacuumActivity.IDLE
 
             _LOGGER.debug(
@@ -914,7 +922,7 @@ class RoboVacEntity(StateVacuumEntity):
 
             # Set error code after maximum retries
             if self.update_failures >= UPDATE_RETRIES:
-                if self._attr_tuya_state in ("Sleeping", "standby"):
+                if _is_sleeping_state(self._attr_tuya_state):
                     _LOGGER.debug(
                         "Maximum update retries reached for vacuum %s, but device is sleeping. Ignoring connection error.",
                         self._attr_name
