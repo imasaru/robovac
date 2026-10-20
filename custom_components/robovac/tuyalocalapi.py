@@ -62,6 +62,10 @@ from cryptography.hazmat.primitives import hmac as crypto_hmac
 INITIAL_BACKOFF = 5
 INITIAL_QUEUE_TIME = 0.1
 BACKOFF_MULTIPLIER = 1.70224
+# After this many consecutive response timeouts the local session is
+# considered dead: it is torn down and rebuilt from scratch (new TCP
+# connection and, for protocol 3.5, a fresh session key negotiation).
+SESSION_REBUILD_TIMEOUTS = 3
 _LOGGER = logging.getLogger(__name__)
 MESSAGE_PREFIX_FORMAT = ">IIII"
 MESSAGE_SUFFIX_FORMAT = ">II"
@@ -878,6 +882,8 @@ class TuyaDevice:
         self._backoff = False
         self._queue_interval = INITIAL_QUEUE_TIME
         self._failures = 0
+        self._consecutive_timeouts = 0
+        self._session_generation = 0
 
         asyncio.create_task(self.process_queue())
 
@@ -1004,6 +1010,8 @@ class TuyaDevice:
             self._dps[str(error_dps)] = "CONNECTION_FAILED"
             raise ConnectionTimeoutException("Connection timed out: {}".format(e))
         self._connected = True
+        # Any reader loop still attached to a previous socket is now stale.
+        self._session_generation += 1
 
         # Protocol 3.5 requires session key negotiation before any communication
         if self.version >= (3, 5):
@@ -1030,7 +1038,7 @@ class TuyaDevice:
 
             self._ping_task = asyncio.create_task(_start_ping())
 
-        asyncio.create_task(self._async_handle_message())
+        asyncio.create_task(self._async_handle_message(self._session_generation))
 
     async def _negotiate_session_key(self) -> None:
         """Negotiate a session key with a Protocol 3.5 device.
@@ -1179,6 +1187,65 @@ class TuyaDevice:
 
         if self.reader is not None and not self.reader.at_eof():
             self.reader.feed_eof()
+
+    async def async_rebuild_session(self) -> None:
+        """Tear down the local session and build a fresh one.
+
+        Used when the device keeps timing out: rather than retrying over a
+        stale socket/session, every piece of per-session state is discarded
+        (socket, reader task, pending listeners, negotiated session key,
+        reconnect cooldown and backoff) and a new connection is opened.
+        For protocol 3.5 this also performs a new session key negotiation.
+        """
+        self._LOGGER.warning(
+            "%d consecutive timeouts from %s, rebuilding local session",
+            self._consecutive_timeouts,
+            self,
+        )
+        self._session_generation += 1
+        self._consecutive_timeouts = 0
+
+        response_task = self._response_task
+        self._response_task = None
+        if response_task is not None and not response_task.done():
+            response_task.cancel()
+
+        writer = self.writer
+        self._connected = False
+        self.last_pong = 0
+        self.writer = None
+        if writer is not None:
+            try:
+                writer.close()
+                await asyncio.wait_for(writer.wait_closed(), timeout=1)
+            except Exception:  # noqa: BLE001 - socket is being discarded
+                pass
+
+        # Wake anyone still waiting on the old session with an error.
+        for sequence, listener in list(self._listeners.items()):
+            if isinstance(listener, asyncio.Semaphore):
+                self._listeners[sequence] = ResponseTimeoutException(
+                    "Session rebuilt while waiting for sequence number {}".format(
+                        sequence
+                    )
+                )
+                listener.release()
+            else:
+                self._listeners.pop(sequence, None)
+
+        # Drop any negotiated session key so the next handshake starts from
+        # the device's local key.
+        self.cipher.set_session_key(self.cipher.real_key_bytes)
+        self._seqno = 0
+        self._last_connect_attempt = 0.0
+        self._failures = 0
+        self._backoff = False
+        self._queue_interval = INITIAL_QUEUE_TIME
+
+        try:
+            await self.async_connect()
+        except TuyaException as e:
+            self._LOGGER.debug("Session rebuild for %s did not connect yet: %s", self, e)
 
     def _dps_to_request(self) -> dict[str, None]:
         """Build a DPS map for device22-style status queries.
@@ -1413,12 +1480,24 @@ class TuyaDevice:
         """
         asyncio.create_task(self.async_set(new_values))
 
-    async def _async_handle_message(self) -> None:
+    async def _async_handle_message(self, generation: int | None = None) -> None:
         """Handle incoming messages.
 
         This method handles incoming messages from the device.
+
+        Args:
+            generation: The session generation this reader loop belongs to.
+                It is bound when the loop is scheduled, so a loop created for
+                a session that has since been rebuilt never reads from the
+                new connection.
         """
-        if self._enabled is False or self._connected is False:
+        if generation is None:
+            generation = self._session_generation
+        if (
+            self._enabled is False
+            or self._connected is False
+            or generation != self._session_generation
+        ):
             return
 
         try:
@@ -1430,6 +1509,9 @@ class TuyaDevice:
             response_data = self._response_task.result()
             message = Message.from_bytes(self, response_data, self.cipher)
         except Exception as e:
+            if generation != self._session_generation:
+                # This reader belongs to a session that has been rebuilt.
+                return
             if isinstance(e, InvalidMessage):
                 self._LOGGER.debug("Invalid message from {}: {}".format(self, e))
             elif isinstance(e, MessageDecodeFailed):
@@ -1452,6 +1534,8 @@ class TuyaDevice:
                 await self.async_disconnect()
 
         else:
+            if generation != self._session_generation:
+                return
             self._LOGGER.debug("Received message from {}: {}".format(self, message))
             if message.sequence in self._listeners:
                 sem = self._listeners[message.sequence]
@@ -1464,7 +1548,7 @@ class TuyaDevice:
                     asyncio.create_task(handler(message))
 
         self._response_task = None
-        asyncio.create_task(self._async_handle_message())
+        asyncio.create_task(self._async_handle_message(generation))
 
     async def _async_send(self, message: Message, retries: int = 2) -> None:
         """Send a message to the device.
@@ -1533,6 +1617,7 @@ class TuyaDevice:
                 if listener is not None:  # Extra check for mypy
                     await asyncio.wait_for(listener.acquire(), timeout=self.timeout)
                 response = self._listeners.pop(message.sequence)
+                self._consecutive_timeouts = 0
 
                 if isinstance(response, Exception):
                     raise response
@@ -1542,15 +1627,19 @@ class TuyaDevice:
                     return response
                 return None
             except TimeoutError:
-                del self._listeners[message.sequence]
-                await self.async_disconnect()
+                self._listeners.pop(message.sequence, None)
+                self._consecutive_timeouts += 1
+                if self._consecutive_timeouts >= SESSION_REBUILD_TIMEOUTS:
+                    await self.async_rebuild_session()
+                else:
+                    await self.async_disconnect()
                 raise ResponseTimeoutException(
                     "Timed out waiting for response to sequence number {}".format(
                         message.sequence
                     )
                 )
             except Exception as e:
-                del self._listeners[message.sequence]
+                self._listeners.pop(message.sequence, None)
                 await self.async_disconnect()
                 raise e
 
